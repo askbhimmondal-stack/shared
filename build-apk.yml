@@ -1,0 +1,126 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fix project structure if needed
+        run: |
+          set -e
+          echo "=== Current root ==="
+          ls -la
+
+          mkdir -p app
+
+          # If root build.gradle is actually the app module file, move it
+          if [ -f build.gradle ] && grep -qE "namespace|applicationId|compileSdk" build.gradle; then
+            echo "FIX: root build.gradle has app content -> moving to app/build.gradle"
+            if [ ! -f app/build.gradle ] || ! grep -qE "namespace|applicationId" app/build.gradle; then
+              cp build.gradle app/build.gradle
+            fi
+          fi
+
+          # Always write correct root build.gradle
+          printf '%s\n' \
+            'buildscript {' \
+            '    repositories {' \
+            '        google()' \
+            '        mavenCentral()' \
+            '    }' \
+            '    dependencies {' \
+            "        classpath 'com.android.tools.build:gradle:8.5.2'" \
+            '    }' \
+            '}' \
+            '' \
+            'allprojects {' \
+            '    repositories {' \
+            '        google()' \
+            '        mavenCentral()' \
+            '    }' \
+            '}' \
+            '' \
+            "tasks.register('clean', Delete) {" \
+            '    delete rootProject.layout.buildDirectory' \
+            '}' \
+            > build.gradle
+
+          printf '%s\n' \
+            "rootProject.name = 'SharedMoney'" \
+            "include ':app'" \
+            > settings.gradle
+
+          # Move misplaced paths
+          if [ -d src ] && [ ! -d app/src ]; then
+            mv src app/src
+            echo "FIX: src/ -> app/src/"
+          fi
+          if [ -f proguard-rules.pro ] && [ ! -f app/proguard-rules.pro ]; then
+            mv proguard-rules.pro app/proguard-rules.pro
+            echo "FIX: proguard-rules.pro -> app/"
+          fi
+          if [ -d wrapper ] && [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            mkdir -p gradle/wrapper
+            mv wrapper/* gradle/wrapper/ 2>/dev/null || true
+            rm -rf wrapper
+            echo "FIX: wrapper/ -> gradle/wrapper/"
+          fi
+
+          # Ensure app module build file exists
+          if [ ! -f app/build.gradle ]; then
+            echo "ERROR: app/build.gradle is missing"
+            find . -name 'build.gradle' -print
+            exit 1
+          fi
+
+          echo ""
+          echo "=== Root build.gradle ==="
+          cat build.gradle
+          echo "=== settings.gradle ==="
+          cat settings.gradle
+          echo "=== app/ ==="
+          ls -la app/
+          head -5 app/build.gradle
+          echo "=== Structure OK ==="
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+          log-accepted-android-sdk-licenses: true
+
+      - name: Accept licenses
+        run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew || true
+
+      - name: Build Debug APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon :app:assembleDebug --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SharedMoney-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
